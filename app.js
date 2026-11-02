@@ -1,0 +1,50 @@
+'use strict';
+const $=id=>document.getElementById(id), stations=NETWORK.stations, lines=NETWORK.lines;
+const stationById=new Map(stations.map(s=>[s.id,s])),lineById=new Map(lines.map(l=>[l.id,l]));
+const key='eki-no-shiori-v1';let data={version:1,custom:[],records:{}},storageError=false,view='map',current=null,pageSize=60;
+function valid(d){
+ if(!d||d.version!==1||!Array.isArray(d.custom)||d.custom.length>10000||!d.records||typeof d.records!=='object'||Array.isArray(d.records))return false;
+ const ids=new Set(stations.map(s=>s.id));for(const s of d.custom){if(!s||typeof s.id!=='string'||!s.id.startsWith('custom-')||ids.has(s.id)||typeof s.name!=='string'||!s.name.trim()||s.name.length>50||typeof s.area!=='string')return false;ids.add(s.id)}
+ for(const [id,r]of Object.entries(d.records)){if(!ids.has(id)||!r||!['none','visited','want'].includes(r.status)||typeof r.memo!=='string'||r.memo.length>100000||typeof r.date!=='string'||(r.date&&!/^\d{4}-\d{2}-\d{2}$/.test(r.date))||typeof r.updated!=='string')return false}return true;
+}
+function normalizeData(d){
+ // Preserve original custom entries and records in backups; the interface shows one exact-name group.
+ const names=new Map(stations.map(s=>[s.name,s.id]));for(const c of d.custom){const canonical=names.get(c.name);if(canonical){if(c.mergedInto!==canonical){const a=d.records[canonical],b=d.records[c.id];if(b){if(!a)d.records[canonical]={...b};else d.records[canonical]={...a,memo:a.memo===b.memo?a.memo:[a.memo,b.memo].filter(Boolean).join('\n\n'),status:a.status==='visited'||b.status==='visited'?'visited':a.status==='want'||b.status==='want'?'want':'none',date:a.date||b.date,updated:[a.updated,b.updated].sort().at(-1)};}c.mergedInto=canonical}}else{delete c.mergedInto;names.set(c.name,c.id)}}return d;
+}
+try{const saved=localStorage.getItem(key);if(saved){const parsed=JSON.parse(saved);if(valid(parsed))data=normalizeData(parsed);else storageError=true}}catch{storageError=true}
+const EMPTY={status:'none',memo:'',date:'',updated:''};function rec(id){return data.records[id]||EMPTY}
+function all(){return [...stations,...data.custom.filter(s=>!s.mergedInto).map(s=>({...s,areas:[s.area],lineIds:[],places:[],kana:s.name}))]}
+function toast(msg){$('toast').textContent=msg;$('toast').classList.remove('hidden');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').classList.add('hidden'),4000)}
+function save(){try{localStorage.setItem(key,JSON.stringify(data));return true}catch{toast('ブラウザに保存できません。「書き出し」で記録を保管してください。');return false}}
+function queryKey(s){return s.toLowerCase().normalize('NFKC').replace(/[ァ-ヶ]/g,c=>String.fromCharCode(c.charCodeAt(0)-96))}
+function match(s){const r=rec(s.id),q=queryKey($('search').value.trim()),f=$('filter').value,line=$('line-filter').value,area=$('area-filter').value;return (!line||s.lineIds.includes(line))&&(!area||s.areas.includes(area))&&(!q||queryKey(s.name+' '+s.kana+' '+s.areas.join(' ')+' '+r.memo).includes(q))&&(f==='all'||(f==='memo'?r.memo.trim():r.status===f))}
+const map=new StationMap($('map'),id=>openNote(id));
+function matchedPlaces(){const ids=new Set(all().filter(match).map(s=>s.id)),area=$('area-filter').value,line=$('line-filter').value;return NETWORK.places.filter(p=>ids.has(p.stationId)&&(!area||p.areas.includes(area))&&(!line||p.lineIds.includes(line)))}
+function render(){
+ const items=all(),matched=items.filter(match),records=items.map(s=>rec(s.id));
+ $('visited-count').textContent=records.filter(r=>r.status==='visited').length;$('want-count').textContent=records.filter(r=>r.status==='want').length;$('memo-count').textContent=records.filter(r=>r.memo.trim()).length;$('total').textContent=matched.length.toLocaleString()+' / '+items.length.toLocaleString()+' 駅名';
+ $('map').classList.toggle('hidden',view!=='map');document.querySelector('.map-help').classList.toggle('hidden',view!=='map');$('list').classList.toggle('hidden',view!=='list');$('more').classList.toggle('hidden',view!=='list'||matched.length<=pageSize);$('map-tab').classList.toggle('active',view==='map');$('list-tab').classList.toggle('active',view==='list');$('view-title').textContent=view==='map'?'わたしの首都圏 駅マップ':'駅と、わたしの記録';
+ $('list').replaceChildren();for(const s of matched.slice(0,pageSize)){const r=rec(s.id),b=document.createElement('button');b.className='card '+r.status;const sm=document.createElement('small');sm.textContent=s.areas.join('・')+' / '+({none:'まだ',visited:'✓ 訪れた',want:'☆ 行きたい'}[r.status]);const title=document.createElement('b');title.textContent=s.name;const route=document.createElement('span');route.className='card-routes';route.textContent=s.lineIds.map(id=>lineById.get(id)?.name).filter(Boolean).join(' / ')||'自分で追加した駅';const memo=document.createElement('span');memo.className='memo';memo.textContent=r.memo||'タップしてメモを書く';b.append(sm,title,route,memo);b.onclick=()=>openNote(s.id);$('list').append(b)}
+ if(!matched.length){const p=document.createElement('p');p.className='empty';p.textContent='該当する駅がありません。絞り込みを変更するか、未収録駅は「駅を追加」で記録できます。';$('list').append(p)}
+ const selected=lineById.get($('line-filter').value);$('route-detail').textContent=selected?selected.name+' / 対象エリアの収録駅 '+matched.length+'駅名。同じ駅名の記録・メモは路線間で共有されます。':'同じ表記の駅名は1件に集約。溝の口／武蔵溝ノ口など、異なる表記の駅は別々に記録します。';
+ $('legend').replaceChildren();const t=document.createElement('span');t.className='empty';t.textContent='駅・路線データ '+NETWORK.retrieved+' 取得 · '+lines.length+'路線データ · 背景は鉄道形状（2024年）';$('legend').append(t);
+ $('recent').replaceChildren();const recent=items.filter(s=>rec(s.id).memo.trim()).sort((a,b)=>rec(b.id).updated.localeCompare(rec(a.id).updated)).slice(0,4);for(const s of recent){const b=document.createElement('button'),name=document.createElement('span'),memo=document.createElement('small');name.textContent=s.name;memo.textContent=rec(s.id).memo.slice(0,36);b.append(name,memo);b.onclick=()=>openNote(s.id);$('recent').append(b)}if(!recent.length){const p=document.createElement('p');p.className='empty';p.textContent='まだメモがありません。最初の駅を選んでみましょう。';$('recent').append(p)}
+ $('progress').textContent=records.filter(r=>r.status==='visited').length.toLocaleString()+' / '+items.length.toLocaleString()+' 駅名';
+ map.setPoints(matchedPlaces(),rec,selected);$('more').textContent='さらに60件表示（'+Math.min(pageSize,matched.length)+' / '+matched.length+'）';
+}
+function openNote(id){
+ current=id;const s=all().find(s=>s.id===id);if(!s)return;const r=rec(id);$('station-name').textContent=s.name;$('station-area').textContent=s.areas.join('・')+' / '+(s.lineIds.length?s.lineIds.length+'路線でメモを共有':'自分で追加した駅');$('status').value=r.status;$('date').value=r.date;$('memo').value=r.memo;
+ $('station-routes').replaceChildren();for(const line of s.lineIds){const l=lineById.get(line);if(!l)continue;const chip=document.createElement('span');chip.className='route-chip';chip.style.borderLeftColor=l.color;chip.textContent=l.name;$('station-routes').append(chip)}
+ $('station-locations').replaceChildren();for(const idx of s.places){const p=NETWORK.places[idx],b=document.createElement('button');b.type='button';b.className='quiet';b.textContent='地図で見る'+(s.places.length>1?'（'+p.areas.join('・')+' '+(s.places.indexOf(idx)+1)+'）':'');b.onclick=()=>{$('editor').close();view='map';$('search').value='';$('filter').value='all';$('line-filter').value='';$('area-filter').value='';render();map.center=map.project(p.lon,p.lat);map.setZoom(15);$('map').scrollIntoView({block:'center',behavior:'smooth'})};$('station-locations').append(b)}
+ $('name-rule').textContent=s.places.length>1?'この駅名は複数の所在地にあります。同名のため記録は1件、地図上の位置はそれぞれ表示します。':'同じ駅名の路線では、この記録とメモが共有されます。';$('editor').showModal();
+}
+$('note-form').onsubmit=e=>{e.preventDefault();data.records[current]={status:$('status').value,date:$('date').value,memo:$('memo').value,updated:new Date().toISOString()};const ok=save();$('editor').close();render();if(ok)toast('駅のしおりを保存しました')};
+$('cancel').onclick=()=>$('editor').close();document.querySelectorAll('dialog .close').forEach(b=>b.onclick=()=>b.closest('dialog').close());
+let searchTimer;$('search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{pageSize=60;render()},120)};
+for(const id of ['filter','line-filter','area-filter'])$(id).onchange=()=>{pageSize=60;render();if(id!=='filter'&&view==='map')map.fit(matchedPlaces())};
+$('map-tab').onclick=()=>{view='map';render()};$('list-tab').onclick=()=>{view='list';render()};$('more').onclick=()=>{pageSize+=60;render()};
+$('zoom').oninput=()=>map.setZoom(Number($('zoom').value));$('zoom-in').onclick=()=>map.setZoom(map.zoom*1.4);$('zoom-out').onclick=()=>map.setZoom(map.zoom/1.4);$('fit-map').onclick=()=>map.fit(matchedPlaces());$('home-map').onclick=()=>map.home();
+$('add').onclick=()=>$('add-dialog').showModal();$('add-form').onsubmit=e=>{e.preventDefault();const name=$('new-name').value.trim();if(!name)return;const existing=all().find(s=>s.name===name);$('add-dialog').close();if(existing){openNote(existing.id);toast('同じ駅名の記録を開きました');return}const s={id:'custom-'+crypto.randomUUID(),name,area:$('new-area').value};data.custom.push(s);save();$('new-name').value='';view='list';for(const id of ['search','line-filter','area-filter'])$(id).value='';$('filter').value='all';render();openNote(s.id)};
+$('export').onclick=()=>{const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='eki-no-shiori-'+new Date().toLocaleDateString('sv-SE')+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('バックアップを書き出しました')};
+$('import').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{if(f.size>8e6)throw Error();const d=JSON.parse(await f.text());if(!valid(d))throw Error();if(!confirm('このバックアップで現在の記録を置き換えます。よろしいですか？'))return;data=normalizeData(d);const ok=save();render();if(ok)toast('バックアップを読み込みました')}catch{toast('有効な「駅のしおり」のバックアップを選んでください。')}finally{e.target.value=''}};
+for(const l of lines){const o=document.createElement('option');o.value=l.id;o.textContent=l.name;$('line-filter').append(o)}render();if(storageError)toast('以前の記録を読み込めませんでした。バックアップがあれば読み込んでください。');
